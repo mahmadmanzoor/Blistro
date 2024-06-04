@@ -37,7 +37,7 @@ and copy the .env.example variables into a separate .env file, fill them out & a
 
 ## Acknowledgements
 
-- [Kinde Auth](https://link.joshtriedcoding.com/kinde) for making this project possible
+- [Kinde Auth](https://kinde.com) for making this project possible
 
 ## License
 
