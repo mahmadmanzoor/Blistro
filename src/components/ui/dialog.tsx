@@ -13,16 +13,10 @@ const DialogTrigger = DialogPrimitive.Trigger;
 const DialogPortal = ({
   className,
   ...props
-}: Omit<
-  React.ComponentPropsWithoutRef<typeof DialogPrimitive.Portal>,
-  "className"
-> & {
-  className?: string;
-}) => (
-  <DialogPrimitive.Portal {...props}>
-    {/* Add the className to a wrapper if styling is needed */}
-    <div className={cn(className)}>{props.children}</div>
-  </DialogPrimitive.Portal>
+}: DialogPrimitive.DialogPortalProps & { className?: string }) => (
+  <div className={cn(className)}>
+    <DialogPrimitive.Portal {...props} />
+  </div>
 );
 DialogPortal.displayName = DialogPrimitive.Portal.displayName;
 
