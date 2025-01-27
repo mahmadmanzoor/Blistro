@@ -45,8 +45,8 @@ export function constructMetadata({
       creator: "@ahmadmanzoor",
     },
     icons,
-    metadataBase: new URL("https://blistro.vercel.app"),
-    // themeColor: "#FFF",
+    metadataBase: new URL("https://blistro-jet.vercel.app"),
+    themeColor: "#FFF",
     ...(noIndex && {
       robots: {
         index: false,
