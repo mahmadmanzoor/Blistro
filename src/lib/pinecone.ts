@@ -5,7 +5,7 @@ export const getPineconeClient = async () => {
 
   await client.init({
     apiKey: process.env.PINECONE_API_KEY!,
-    environment: "us-east-1-aws",
+    environment: "us-east-1",
   });
 
   return client;

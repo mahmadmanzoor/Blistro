@@ -46,16 +46,19 @@ const onUploadComplete = async ({
       key: file.key,
       name: file.name,
       userId: metadata.userId,
-      url: `https://uploadthing-prod.s3.us-west-2.amazonaws.com/${file.key}`,
+      url: file.url,
       uploadStatus: "PROCESSING",
     },
   });
 
   try {
-    const response = await fetch(
-      `https://uploadthing-prod.s3.us-west-2.amazonaws.com/${file.key}`
-    );
+    const response = await fetch(file.url);
 
+    if (!response.ok) {
+      throw new Error(
+        `Failed to fetch PDF: ${response.status} ${response.statusText}`
+      );
+    }
     const blob = await response.blob();
 
     const loader = new PDFLoader(blob);
@@ -90,6 +93,11 @@ const onUploadComplete = async ({
     const embeddings = new OpenAIEmbeddings({
       openAIApiKey: process.env.OPENAI_API_KEY,
     });
+
+    // Add validation for Pinecone index
+    if (!pineconeIndex) {
+      throw new Error("Pinecone index not initialized");
+    }
 
     await PineconeStore.fromDocuments(pageLevelDocs, embeddings, {
       pineconeIndex,
