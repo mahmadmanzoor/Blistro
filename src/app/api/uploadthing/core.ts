@@ -2,9 +2,9 @@ import { db } from "@/db";
 import { getKindeServerSession } from "@kinde-oss/kinde-auth-nextjs/server";
 import { createUploadthing, type FileRouter } from "uploadthing/next";
 
-import { PDFLoader } from "langchain/document_loaders/fs/pdf";
-import { OpenAIEmbeddings } from "langchain/embeddings/openai";
-import { PineconeStore } from "langchain/vectorstores/pinecone";
+import { PineconeStore } from "@langchain/pinecone";
+import { getEmbeddings } from "@/lib/embeddings";
+import { loadPdfPages } from "@/lib/pdf-loader";
 import { getPineconeClient } from "@/lib/pinecone";
 import { getUserSubscriptionPlan } from "@/lib/stripe";
 import { PLANS } from "@/config/stripe";
@@ -13,7 +13,7 @@ const f = createUploadthing();
 
 const middleware = async () => {
   const { getUser } = getKindeServerSession();
-  const user = getUser();
+  const user = await getUser();
 
   if (!user || !user.id) throw new Error("Unauthorized");
 
@@ -61,9 +61,7 @@ const onUploadComplete = async ({
     }
     const blob = await response.blob();
 
-    const loader = new PDFLoader(blob);
-
-    const pageLevelDocs = await loader.load();
+    const pageLevelDocs = await loadPdfPages(blob);
 
     const pagesAmt = pageLevelDocs.length;
 
@@ -90,9 +88,7 @@ const onUploadComplete = async ({
     const pinecone = await getPineconeClient();
     const pineconeIndex = pinecone.Index("blistro");
 
-    const embeddings = new OpenAIEmbeddings({
-      openAIApiKey: process.env.OPENAI_API_KEY,
-    });
+    const embeddings = getEmbeddings();
 
     // Add validation for Pinecone index
     if (!pineconeIndex) {

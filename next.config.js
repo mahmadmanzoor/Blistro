@@ -1,5 +1,9 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
+  // Load pdf-parse's bundled pdf.js from node_modules at runtime instead of
+  // bundling it (used by src/lib/pdf-loader.ts).
+  serverExternalPackages: ["pdf-parse"],
+
   // 1. Whitelist external image domains here
   images: {
     domains: ["gravatar.com"],

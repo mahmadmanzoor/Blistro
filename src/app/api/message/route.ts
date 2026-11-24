@@ -3,11 +3,9 @@ import { openai } from "@/lib/openai";
 import { getPineconeClient } from "@/lib/pinecone";
 import { SendMessageValidator } from "@/lib/validators/SendMessageValidator";
 import { getKindeServerSession } from "@kinde-oss/kinde-auth-nextjs/server";
-import { OpenAIEmbeddings } from "langchain/embeddings/openai";
-import { PineconeStore } from "langchain/vectorstores/pinecone";
+import { getEmbeddings } from "@/lib/embeddings";
+import { PineconeStore } from "@langchain/pinecone";
 import { NextRequest } from "next/server";
-
-import { OpenAIStream, StreamingTextResponse } from "ai";
 
 export const POST = async (req: NextRequest) => {
   // endpoint for asking a question to a pdf file
@@ -15,9 +13,9 @@ export const POST = async (req: NextRequest) => {
   const body = await req.json();
 
   const { getUser } = getKindeServerSession();
-  const user = getUser();
+  const user = await getUser();
 
-  const { id: userId } = user;
+  const userId = user?.id;
 
   if (!userId) return new Response("Unauthorized", { status: 401 });
 
@@ -42,9 +40,7 @@ export const POST = async (req: NextRequest) => {
   });
 
   // 1: vectorize message
-  const embeddings = new OpenAIEmbeddings({
-    openAIApiKey: process.env.OPENAI_API_KEY,
-  });
+  const embeddings = getEmbeddings();
 
   const pinecone = await getPineconeClient();
   const pineconeIndex = pinecone.Index("blistro");
@@ -103,18 +99,37 @@ export const POST = async (req: NextRequest) => {
     ],
   });
 
-  const stream = OpenAIStream(response, {
-    async onCompletion(completion) {
-      await db.message.create({
-        data: {
-          text: completion,
-          isUserMessage: false,
-          fileId,
-          userId,
-        },
-      });
+  // Stream the answer as plain text (same wire format the old `ai`
+  // StreamingTextResponse used), then save the full answer.
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      let completion = "";
+      try {
+        for await (const chunk of response) {
+          const text = chunk.choices[0]?.delta?.content ?? "";
+          if (!text) continue;
+          completion += text;
+          controller.enqueue(encoder.encode(text));
+        }
+
+        await db.message.create({
+          data: {
+            text: completion,
+            isUserMessage: false,
+            fileId,
+            userId,
+          },
+        });
+
+        controller.close();
+      } catch (err) {
+        controller.error(err);
+      }
     },
   });
 
-  return new StreamingTextResponse(stream);
+  return new Response(stream, {
+    headers: { "Content-Type": "text/plain; charset=utf-8" },
+  });
 };
