@@ -3,8 +3,9 @@
 import { useRouter, useSearchParams } from 'next/navigation'
 import { trpc } from '../_trpc/client'
 import { Loader2 } from 'lucide-react'
+import { Suspense } from 'react'
 
-const Page = () => {
+const AuthCallback = () => {
   const router = useRouter()
 
   const searchParams = useSearchParams()
@@ -38,5 +39,12 @@ const Page = () => {
     </div>
   )
 }
+
+// useSearchParams needs a Suspense boundary for the static build (Next 15)
+const Page = () => (
+  <Suspense>
+    <AuthCallback />
+  </Suspense>
+)
 
 export default Page

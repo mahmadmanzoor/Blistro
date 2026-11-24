@@ -1,6 +1,7 @@
 import Navbar from '@/components/Navbar'
 import Providers from '@/components/Providers'
 import { cn, constructMetadata } from '@/lib/utils'
+import type { Viewport } from 'next'
 import { Inter } from 'next/font/google'
 import './globals.css'
 
@@ -12,6 +13,10 @@ import { Toaster } from '@/components/ui/toaster'
 const inter = Inter({ subsets: ['latin'] })
 
 export const metadata = constructMetadata()
+
+export const viewport: Viewport = {
+  themeColor: '#FFF',
+}
 
 export default function RootLayout({
   children,

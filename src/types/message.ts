@@ -1,3 +1,4 @@
+import type { JSX } from 'react'
 import { AppRouter } from '@/trpc'
 import { inferRouterOutputs } from '@trpc/server'
 
