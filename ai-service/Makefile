@@ -1,4 +1,4 @@
-.PHONY: install db test lint api worker corpus dataset eval eval-smoke
+.PHONY: install db test lint api worker corpus dataset eval eval-smoke explain
 
 install:
 	uv sync --extra local-rerank
@@ -29,3 +29,6 @@ eval:
 
 eval-smoke:
 	uv run python -m evals.run_eval --limit 15 --rerankers none
+
+explain:
+	uv run python -m scripts.explain_queries --rows 60000 --users 200

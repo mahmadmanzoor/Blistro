@@ -26,13 +26,14 @@ jobs:
         image: pgvector/pgvector:pg17
         env:
           POSTGRES_USER: blistro
-          POSTGRES_PASSWORD: blistro
+          # Throwaway CI container: trust auth, so no password lives in the repo.
+          POSTGRES_HOST_AUTH_METHOD: trust
           POSTGRES_DB: blistro_ai_test
         ports: ["5432:5432"]
         options: >-
           --health-cmd "pg_isready -U blistro" --health-interval 3s --health-retries 20
     env:
-      DATABASE_URL: postgresql://blistro:blistro@localhost:5432/blistro_ai_test
+      DATABASE_URL: postgresql://blistro@localhost:5432/blistro_ai_test
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
@@ -55,13 +56,14 @@ jobs:
         image: pgvector/pgvector:pg17
         env:
           POSTGRES_USER: blistro
-          POSTGRES_PASSWORD: blistro
+          # Throwaway CI container: trust auth, so no password lives in the repo.
+          POSTGRES_HOST_AUTH_METHOD: trust
           POSTGRES_DB: blistro_ai
         ports: ["5432:5432"]
         options: >-
           --health-cmd "pg_isready -U blistro" --health-interval 3s --health-retries 20
     env:
-      DATABASE_URL: postgresql://blistro:blistro@localhost:5432/blistro_ai
+      DATABASE_URL: postgresql://blistro@localhost:5432/blistro_ai
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       AUTH_MODE: dev
       RERANK_PROVIDER: none

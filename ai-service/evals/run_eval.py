@@ -7,10 +7,10 @@ Two parts:
    covers the gold page. Reports recall@k, MRR@k and search latency.
 
 2. End-to-end (LLM): the full LangGraph agent on the active config. An LLM judge
-   scores faithfulness (share of answer claims supported by the retrieved context)
-   and correctness against the reference answer. Citation accuracy is computed,
-   not judged: does any cited source point at the gold page? Also records
-   time-to-first-token.
+   scores correctness against the reference answer, plus the RAGAS-defined
+   faithfulness, response relevancy, context precision and context recall (see
+   evals/metrics.py). Citation accuracy is computed, not judged: does any cited
+   source point at the gold page? Also records time to first token.
 
     uv run python -m evals.run_eval                     # dev split, everything
     uv run python -m evals.run_eval --limit 15          # smoke run (CI)
@@ -40,6 +40,8 @@ from app.agent.graph import ANSWER_TAG, build_graph
 from app.agent.llm import chat_model
 from app.agent.prompts import NOT_FOUND
 from app.config import get_settings
+from app.embeddings import get_embedder
+from evals import metrics
 from evals.build_dataset import Item, load
 
 HERE = Path(__file__).parent
@@ -114,20 +116,11 @@ async def eval_retrieval(items: list[Item], cfg: RetrievalConfig, k: int) -> dic
 # ---------------------------------------------------------------- end-to-end
 
 
-class Faithfulness(BaseModel):
-    total_claims: int = Field(description="factual claims in the answer")
-    supported_claims: int = Field(description="claims fully supported by the context")
-
-
 class Correctness(BaseModel):
     score: int = Field(ge=1, le=5, description="5 = same facts as the reference")
     reason: str
 
 
-FAITH_PROMPT = (
-    "Count the factual claims in the ANSWER, then count how many are fully supported by "
-    "the CONTEXT. Ignore citations, greetings and statements that the answer wasn't found."
-)
 CORRECT_PROMPT = (
     "Score how well the ANSWER matches the REFERENCE for the QUESTION, from 1 (wrong or "
     "missing) to 5 (all key facts of the reference, nothing contradicting it). Extra "
@@ -177,29 +170,33 @@ async def run_agent(graph, item: Item, doc_ids: list[str]) -> dict:
 async def judge(item: Item, out: dict) -> dict:
     judge_llm = chat_model(model=get_settings().judge_model)
     not_found = out["answer"].strip().startswith(NOT_FOUND[:20])
-    faith = None
-    if out["context"] and not not_found:
-        f = await judge_llm.with_structured_output(Faithfulness).ainvoke(
+    # Context metrics score the retriever on the active config, independent of
+    # what the agent then did with it.
+    hits = await retrieval.search(EVAL_USER, item.question)
+    chunks = [h.content for h in hits]
+    faith, relevancy, precision, recall, c = await asyncio.gather(
+        metrics.faithfulness(judge_llm, out["answer"], "" if not_found else out["context"]),
+        metrics.response_relevancy(judge_llm, get_embedder(), item.question, out["answer"]),
+        metrics.context_precision(judge_llm, item.question, item.answer, chunks),
+        metrics.context_recall(judge_llm, item.answer, chunks),
+        judge_llm.with_structured_output(Correctness).ainvoke(
             [
-                ("system", FAITH_PROMPT),
-                ("human", f"CONTEXT:\n{out['context'][:20000]}\n\nANSWER:\n{out['answer']}"),
+                ("system", CORRECT_PROMPT),
+                (
+                    "human",
+                    f"QUESTION: {item.question}\nREFERENCE: {item.answer}\nANSWER: {out['answer']}",
+                ),
             ]
-        )
-        faith = f.supported_claims / f.total_claims if f.total_claims else 1.0
-    c = await judge_llm.with_structured_output(Correctness).ainvoke(
-        [
-            ("system", CORRECT_PROMPT),
-            (
-                "human",
-                f"QUESTION: {item.question}\nREFERENCE: {item.answer}\nANSWER: {out['answer']}",
-            ),
-        ]
+        ),
     )
     cited_ok = any(
         page_match(s["document_id"], s["page_start"], s["page_end"], item) for s in out["sources"]
     )
     return {
         "faithfulness": faith,
+        "response_relevancy": relevancy,
+        "context_precision": precision,
+        "context_recall": recall,
         "correctness": c.score,
         "correct": c.score >= 4,
         "citation_ok": cited_ok,
@@ -208,9 +205,16 @@ async def judge(item: Item, out: dict) -> dict:
     }
 
 
-async def eval_e2e(items: list[Item], concurrency: int) -> tuple[dict, list[dict]]:
+def _mean(rows: list[dict], key: str) -> float | None:
+    vals = [r[key] for r in rows if r.get(key) is not None]
+    return statistics.mean(vals) if vals else None
+
+
+async def eval_e2e(
+    items: list[Item], concurrency: int, doc_ids: list[str]
+) -> tuple[dict, list[dict]]:
+    """The agent sees every corpus document, so it must find the right one."""
     graph = build_graph()
-    doc_ids = sorted({i.document_id for i in load(split="all")})
     sem = asyncio.Semaphore(concurrency)
 
     async def one(item: Item) -> dict:
@@ -234,6 +238,9 @@ async def eval_e2e(items: list[Item], concurrency: int) -> tuple[dict, list[dict
         "correct_rate": sum(r["correct"] for r in ok) / n,
         "mean_correctness": statistics.mean(r["correctness"] for r in ok) if ok else 0,
         "faithfulness": statistics.mean(faith) if faith else None,
+        "response_relevancy": _mean(ok, "response_relevancy"),
+        "context_precision": _mean(ok, "context_precision"),
+        "context_recall": _mean(ok, "context_recall"),
         "citation_accuracy": sum(r["citation_ok"] for r in ok) / n,
         "not_found_rate": sum(r["not_found"] for r in ok) / n,
         "ttft_p50_ms": pct(ttft, 0.5),
@@ -247,50 +254,84 @@ async def eval_e2e(items: list[Item], concurrency: int) -> tuple[dict, list[dict
 # ---------------------------------------------------------------- langfuse
 
 
-def log_langfuse_experiment(items: list[Item], rows: list[dict], run_name: str) -> None:
-    """Record the end-to-end run as a Langfuse experiment (dataset + scores),
-    so runs can be compared side by side in the UI."""
+def log_langfuse_experiment(
+    items: list[Item], rows: list[dict], run_name: str, split: str, client=None
+) -> str | None:
+    """Mirror the eval set into a Langfuse dataset (items upserted by id) and log
+    this run on it with dataset.run_experiment, so runs can be compared side by
+    side in the Langfuse UI. The agent already ran; the task returns its answer
+    and the evaluators attach the scores computed above."""
     s = get_settings()
-    if not s.langfuse_enabled:
-        print("Langfuse keys not set; skipping experiment upload.")
-        return
-    from langfuse import Evaluation, Langfuse
+    if client is None:
+        if not s.langfuse_enabled:
+            print("Langfuse keys not set; skipping experiment upload.")
+            return None
+        from langfuse import Langfuse
 
-    client = Langfuse(
-        public_key=s.langfuse_public_key, secret_key=s.langfuse_secret_key, host=s.langfuse_host
-    )
+        client = Langfuse(
+            public_key=s.langfuse_public_key,
+            secret_key=s.langfuse_secret_key,
+            host=s.langfuse_host,
+        )
+    from langfuse import Evaluation
+
+    dataset_name = f"blistro-rag-{split}"
+    try:
+        client.create_dataset(
+            name=dataset_name, description="Blistro RAG questions with gold pages"
+        )
+    except Exception:  # noqa: BLE001 - already exists
+        pass
     by_id = {r["id"]: r for r in rows if "error" not in r}
-    data = [
-        {
-            "input": {"id": i.id, "question": i.question},
-            "expected_output": i.answer,
-            "metadata": {"document_id": i.document_id, "page": i.page, "split": i.split},
-        }
-        for i in items
-        if i.id in by_id
-    ]
+    for i in items:
+        client.create_dataset_item(
+            dataset_name=dataset_name,
+            id=f"{dataset_name}-{i.id}",
+            input={"id": i.id, "question": i.question},
+            expected_output=i.answer,
+            metadata={"document_id": i.document_id, "page": i.page, "kind": i.kind},
+        )
+
+    def _input(item) -> dict:
+        return item["input"] if isinstance(item, dict) else item.input
 
     def task(*, item, **_):
-        return by_id[item["input"]["id"]]["answer"]
+        row = by_id.get(_input(item)["id"])
+        return row["answer"] if row else None
 
     def scores(*, input, output, expected_output, **_):
-        r = by_id[input["id"]]
+        r = by_id.get(input["id"])
+        if r is None:
+            return []
         out = [
             Evaluation(name="correctness", value=r["correctness"]),
             Evaluation(name="citation_ok", value=bool(r["citation_ok"]), data_type="BOOLEAN"),
         ]
-        if r["faithfulness"] is not None:
-            out.append(Evaluation(name="faithfulness", value=r["faithfulness"]))
+        for key in ("faithfulness", "response_relevancy", "context_precision", "context_recall"):
+            if r.get(key) is not None:
+                out.append(Evaluation(name=key, value=r[key]))
         return out
 
-    client.run_experiment(
-        name="blistro-rag", run_name=run_name, data=data, task=task, evaluators=[scores]
+    dataset = client.get_dataset(dataset_name)
+    dataset.run_experiment(
+        name="blistro-rag",
+        run_name=run_name,
+        task=task,
+        evaluators=[scores],
+        metadata={"chat_model": s.chat_model, "strategy": s.active_strategy},
     )
     client.flush()
-    print(f"Langfuse experiment logged: blistro-rag / {run_name}")
+    print(f"Langfuse experiment logged: {dataset_name} / {run_name}")
+    return dataset_name
 
 
 # ---------------------------------------------------------------- report
+
+
+def _fmt(v: float | None, pct: bool = True) -> str:
+    if v is None:
+        return "n/a"
+    return f"{v:.1%}" if pct else f"{v:.3f}"
 
 
 def report(split: str, n: int, retrieval_rows: list[dict], e2e: dict | None, k: int) -> str:
@@ -325,7 +366,10 @@ def report(split: str, n: int, retrieval_rows: list[dict], e2e: dict | None, k: 
             f"| questions (errors) | {e2e['n']} ({e2e['errors']}) |",
             f"| correct (judge score >= 4/5) | {e2e['correct_rate']:.1%} |",
             f"| mean correctness (1-5) | {e2e['mean_correctness']:.2f} |",
-            f"| faithfulness | {'n/a' if f is None else f'{f:.1%}'} |",
+            f"| faithfulness | {_fmt(f)} |",
+            f"| response relevancy | {_fmt(e2e['response_relevancy'], pct=False)} |",
+            f"| context precision@{k} | {_fmt(e2e['context_precision'], pct=False)} |",
+            f"| context recall@{k} | {_fmt(e2e['context_recall'], pct=False)} |",
             f"| citation points at gold page | {e2e['citation_accuracy']:.1%} |",
             f"| answered 'not found' | {e2e['not_found_rate']:.1%} |",
             f"| time to first token p50 / p95 | {e2e['ttft_p50_ms']:.0f} / "
@@ -380,7 +424,8 @@ async def main() -> None:
 
         e2e_summary, e2e_rows = None, []
         if not args.skip_e2e:
-            e2e_summary, e2e_rows = await eval_e2e(items, args.concurrency)
+            doc_ids = sorted({i.document_id for i in load(split="all")})
+            e2e_summary, e2e_rows = await eval_e2e(items, args.concurrency, doc_ids)
             print(json.dumps(e2e_summary, indent=2))
     finally:
         await db.close_pool()
@@ -400,7 +445,7 @@ async def main() -> None:
     print(md)
     print(f"saved evals/results/{tag}.md")
     if args.langfuse and e2e_rows:
-        log_langfuse_experiment(items, e2e_rows, tag)
+        log_langfuse_experiment(items, e2e_rows, tag, args.split)
 
 
 if __name__ == "__main__":

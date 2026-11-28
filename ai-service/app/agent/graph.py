@@ -62,6 +62,7 @@ class AgentState(TypedDict, total=False):
     strict: bool
     sources: list[dict]
     prompt_meta: dict
+    model_failed: bool
 
 
 # ---------------------------------------------------------------- structured outputs
@@ -139,6 +140,7 @@ async def route(state: AgentState, config: RunnableConfig) -> dict:
         "strict": False,
         "answer": "",
         "context": "",
+        "model_failed": False,
         "sources": [],
         "prompt_meta": {},
     }
@@ -185,8 +187,21 @@ async def grade(state: AgentState, config: RunnableConfig) -> dict:
 async def rewrite(state: AgentState, config: RunnableConfig) -> dict:
     _progress("Rephrasing the search")
     msgs, _ = _prompt("blistro-rewrite", question=state["question"])
-    msg = await chat_model().ainvoke(msgs, config)
-    return {"query": str(msg.content).strip().strip('"'), "rewrites": state.get("rewrites", 0) + 1}
+    try:
+        msg = await chat_model().ainvoke(msgs, config)
+        query = str(msg.content).strip().strip('"') or state["question"]
+    except Exception:  # noqa: BLE001 - search again with the original wording
+        log.warning("rewrite failed; reusing the question", exc_info=True)
+        query = state["question"]
+    return {"query": query, "rewrites": state.get("rewrites", 0) + 1}
+
+
+def _model_failed(exc: Exception) -> dict:
+    """The model failed twice (one retry inside the client). Give a clear answer
+    instead of an error, and leave no context so the grounding check skips it."""
+    log.warning("model call failed after retry: %s", exc, exc_info=True)
+    _emit({"type": "token", "text": prompts.MODEL_FAILED})
+    return {"answer": prompts.MODEL_FAILED, "context": "", "model_failed": True}
 
 
 async def generate(state: AgentState, config: RunnableConfig) -> dict:
@@ -207,7 +222,10 @@ async def generate(state: AgentState, config: RunnableConfig) -> dict:
         strict_note=strict_note,
     )
     llm = chat_model(streaming=True).with_config(tags=[ANSWER_TAG])
-    msg = await llm.ainvoke(msgs, config)
+    try:
+        msg = await llm.ainvoke(msgs, config)
+    except Exception as exc:  # noqa: BLE001
+        return _model_failed(exc)
     return {
         "answer": str(msg.content),
         "context": _label_passages(hits),
@@ -236,7 +254,10 @@ async def tool_agent(state: AgentState, config: RunnableConfig) -> dict:
             )
         ]
     llm = chat_model(streaming=True).bind_tools(TOOLS).with_config(tags=[ANSWER_TAG])
-    msg = await llm.ainvoke([*system, *_history_messages(state), *scratch, *seed], config)
+    try:
+        msg = await llm.ainvoke([*system, *_history_messages(state), *scratch, *seed], config)
+    except Exception as exc:  # noqa: BLE001
+        return _model_failed(exc) | {"tool_steps": state.get("tool_steps", 0) + 1}
     update: dict = {
         "scratch": [*seed, msg],
         "tool_steps": state.get("tool_steps", 0) + 1,
@@ -281,7 +302,10 @@ async def check_grounding(state: AgentState, config: RunnableConfig) -> dict:
 async def direct(state: AgentState, config: RunnableConfig) -> dict:
     msgs, _ = _prompt("blistro-direct")
     llm = chat_model(streaming=True).with_config(tags=[ANSWER_TAG])
-    msg = await llm.ainvoke([*msgs, *_history_messages(state), state["messages"][-1]], config)
+    try:
+        msg = await llm.ainvoke([*msgs, *_history_messages(state), state["messages"][-1]], config)
+    except Exception as exc:  # noqa: BLE001
+        return _model_failed(exc)
     return {"answer": str(msg.content)}
 
 
@@ -345,6 +369,8 @@ def after_grade(state: AgentState) -> str:
 
 
 def after_tool_agent(state: AgentState) -> str:
+    if state.get("model_failed"):
+        return "finalize"
     scratch = state.get("scratch") or []
     last = scratch[-1] if scratch else None
     if getattr(last, "tool_calls", None) and state.get("tool_steps", 0) < MAX_TOOL_STEPS:

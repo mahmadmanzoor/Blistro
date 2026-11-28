@@ -61,7 +61,9 @@ flowchart TD
 - **Memory**: conversation state is checkpointed in Postgres (`AsyncPostgresSaver`)
   per user and file; per-turn working state is reset each turn.
 - **Guardrails**: recursion limit, tool-step limit, LLM and tool timeouts,
-  per-user rate limit.
+  per-user rate limit. A model call that fails twice (one retry in the client)
+  returns a clear "try again" answer instead of an error. Checkpoints load with
+  `LANGGRAPH_STRICT_MSGPACK=true`.
 
 ### Retrieval
 
@@ -157,17 +159,53 @@ make eval                 # retrieval matrix + end-to-end agent, report in evals
   latency.
 - **End-to-end metrics:**
   - judge correctness against the reference answer;
-  - faithfulness (the share of answer claims supported by the retrieved context);
+  - faithfulness, response relevancy, context precision and context recall, as
+    defined by RAGAS. They are implemented as LLM judges in
+    [evals/metrics.py](evals/metrics.py), so every prompt and formula is visible;
   - citation accuracy (a cited page is the gold page; computed, not judged);
   - the "not found" rate;
   - time to first token, p50 and p95.
-- **Langfuse:** with keys set, `--langfuse` logs the run as a Langfuse
-  experiment, so runs can be compared in the UI.
+- **Langfuse:** with keys set, `--langfuse` mirrors the questions into a Langfuse
+  dataset (`blistro-rag-dev` or `blistro-rag-test`) and logs the run with
+  `dataset.run_experiment`, so runs can be compared in the UI.
 - **CI:** runs lint and tests (with a pgvector service) on every change. On pull
   requests it also runs a 15-question smoke eval when the `OPENAI_API_KEY` secret
   is set.
 
 Results: see `evals/results/` (written by `make eval`).
+
+## Performance
+
+`scripts/explain_queries.py` runs `EXPLAIN ANALYZE` on the two retrieval queries
+against a synthetic 60,000-chunk table: 200 users with skewed sizes and
+1536-dim vectors. Full output: [evals/results/explain.md](evals/results/explain.md).
+
+**Vector search filtered by user (top 5).** This found a correctness bug, not
+only a speed problem:
+
+| case | user (chunks) | ms | rows |
+|---|---|---|---|
+| no vector index (btree on user, then sort) | 10,155 | 97.8 | 5 |
+| HNSW, plain scan | 10,155 | 1.5 | **3** |
+| HNSW, plain scan | 39 | 1.4 | **0** |
+| HNSW + iterative scan | 10,155 | 3.2 | 5 |
+| HNSW + iterative scan + btree on user (what the service uses) | 39 / 10,155 | 0.3 / 3.6 | 5 / 5 |
+
+- **Why rows go missing:** a plain HNSW scan takes `ef_search` nearest
+  candidates first, then drops the ones that belong to other users. A small
+  user's chunks are rarely among them, so their search came back empty.
+- **The fix:** `hnsw.iterative_scan = relaxed_order` (pgvector 0.8) keeps
+  scanning until k rows pass the filter.
+- **Why the btree stays:** with the user btree in place as well, the planner
+  uses it for small users. Small users get 0.3 ms instead of a long iterative
+  scan, and large users get HNSW.
+
+**Full-text search for a rare exact term:**
+
+- Without an index: 17.5 ms, a sequential scan.
+- With a GIN index on the generated `tsvector` column: 0.2 ms.
+
+Time to first token (p50/p95) comes from `make eval`.
 
 ## Prompts and tracing
 
@@ -193,5 +231,5 @@ app/
   observability.py  Langfuse callbacks and prompt fetching
 evals/              dataset builder, eval runner, corpus sources, results
 scripts/            local ingest, prompt upload
-tests/              unit + Postgres integration tests
+tests/              unit, Postgres integration, and full-graph tests with a scripted model
 ```

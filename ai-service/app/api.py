@@ -10,7 +10,14 @@ GET  /health
 
 from __future__ import annotations
 
-import asyncio
+import os
+
+# Only allow known types when loading checkpoints, so a tampered checkpoint row
+# can't make the deserializer build arbitrary objects. Read at import time by
+# langgraph, so set it before importing it.
+os.environ.setdefault("LANGGRAPH_STRICT_MSGPACK", "true")
+
+import asyncio  # noqa: E402
 import logging
 import time
 from collections.abc import AsyncIterator

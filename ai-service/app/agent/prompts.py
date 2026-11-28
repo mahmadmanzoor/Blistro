@@ -102,6 +102,7 @@ DIRECT = [
 ]
 
 NOT_FOUND = "I couldn't find that in your documents."
+MODEL_FAILED = "Sorry, I couldn't answer that just now. Please try again in a moment."
 
 ALL = {
     "blistro-router": ROUTER,
