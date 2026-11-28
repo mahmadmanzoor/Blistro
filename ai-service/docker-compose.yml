@@ -1,0 +1,37 @@
+# Local stack: Postgres + pgvector, the API and the ingestion worker.
+#   cp .env.example .env   # add OPENAI_API_KEY
+#   docker compose up --build
+services:
+  db:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_USER: blistro
+      POSTGRES_PASSWORD: blistro
+      POSTGRES_DB: blistro_ai
+    ports: ["55433:5432"]
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U blistro -d blistro_ai"]
+      interval: 3s
+      retries: 20
+
+  api:
+    build: .
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://blistro:blistro@db:5432/blistro_ai
+    ports: ["8000:8000"]
+    depends_on:
+      db: { condition: service_healthy }
+
+  worker:
+    build: .
+    command: ["python", "-m", "app.worker"]
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://blistro:blistro@db:5432/blistro_ai
+    depends_on:
+      db: { condition: service_healthy }
+
+volumes:
+  pgdata:

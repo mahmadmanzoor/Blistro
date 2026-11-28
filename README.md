@@ -42,3 +42,8 @@ and copy the .env.example variables into a separate .env file, fill them out & a
 ## License
 
 [MIT](https://choosealicense.com/licenses/mit/)
+## Agentic RAG service
+
+`ai-service/` is a Python LangGraph agent (FastAPI, Postgres + pgvector, Langfuse)
+that replaces the original single-call RAG when `AI_SERVICE_URL` and
+`AI_SERVICE_TOKEN` are set. See [ai-service/README.md](ai-service/README.md).

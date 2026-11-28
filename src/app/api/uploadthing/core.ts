@@ -8,6 +8,7 @@ import { loadPdfPages } from "@/lib/pdf-loader";
 import { getPineconeClient } from "@/lib/pinecone";
 import { getUserSubscriptionPlan } from "@/lib/stripe";
 import { PLANS } from "@/config/stripe";
+import { aiServiceEnabled, registerDocument } from "@/lib/ai-service";
 
 const f = createUploadthing();
 
@@ -82,6 +83,20 @@ const onUploadComplete = async ({
           id: createdFile.id,
         },
       });
+      return;
+    }
+
+    if (aiServiceEnabled()) {
+      // Parsing, chunking and embedding run in the AI service's worker; the
+      // status is synced by getFileUploadStatus. The service fetches the PDF
+      // itself from uploadthing's CDN (host allowlisted there).
+      await registerDocument({
+        userId: metadata.userId,
+        documentId: createdFile.id,
+        name: file.name,
+        url: file.url,
+      });
+      return;
     }
 
     // vectorize and index entire document
