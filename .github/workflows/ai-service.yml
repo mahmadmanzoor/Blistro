@@ -1,0 +1,90 @@
+name: ai-service
+
+on:
+  push:
+    branches: [main]
+    paths: ["ai-service/**", ".github/workflows/ai-service.yml"]
+  pull_request:
+    paths: ["ai-service/**", ".github/workflows/ai-service.yml"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ai-service-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: ai-service
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: blistro
+          POSTGRES_PASSWORD: blistro
+          POSTGRES_DB: blistro_ai_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U blistro" --health-interval 3s --health-retries 20
+    env:
+      DATABASE_URL: postgresql://blistro:blistro@localhost:5432/blistro_ai_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.13.5"
+          enable-cache: true
+      - run: uv sync --frozen
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run pytest -q
+
+  eval-smoke:
+    # Small retrieval + agent eval on PRs. Needs the OPENAI_API_KEY repo secret;
+    # skipped (not failed) when it isn't set, e.g. on forks.
+    needs: test
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: blistro
+          POSTGRES_PASSWORD: blistro
+          POSTGRES_DB: blistro_ai
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U blistro" --health-interval 3s --health-retries 20
+    env:
+      DATABASE_URL: postgresql://blistro:blistro@localhost:5432/blistro_ai
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      AUTH_MODE: dev
+      RERANK_PROVIDER: none
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check for key
+        id: key
+        run: echo "present=${{ secrets.OPENAI_API_KEY != '' }}" >> "$GITHUB_OUTPUT"
+      - uses: astral-sh/setup-uv@v6
+        if: steps.key.outputs.present == 'true'
+        with:
+          version: "0.13.5"
+          enable-cache: true
+      - if: steps.key.outputs.present == 'true'
+        run: |
+          uv sync --frozen
+          ./evals/corpus/fetch.sh
+          uv run python -m scripts.ingest_local evals/corpus/*.pdf --strategies recursive
+          uv run python -m evals.run_eval --limit 15 --strategies recursive --rerankers none \
+            | tee eval.log
+          cat evals/results/*.md >> "$GITHUB_STEP_SUMMARY"
+      - if: steps.key.outputs.present == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-results
+          path: ai-service/evals/results/

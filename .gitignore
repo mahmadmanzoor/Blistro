@@ -36,3 +36,12 @@ yarn-error.log*
 next-env.d.ts
 
 .vercel
+
+# AI service
+ai-service/.env
+ai-service/.venv/
+ai-service/evals/corpus/*.pdf
+ai-service/.cache/
+__pycache__/
+ai-service/.pytest_cache/
+ai-service/.ruff_cache/

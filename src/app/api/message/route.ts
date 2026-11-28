@@ -6,6 +6,7 @@ import { getKindeServerSession } from "@kinde-oss/kinde-auth-nextjs/server";
 import { getEmbeddings } from "@/lib/embeddings";
 import { PineconeStore } from "@langchain/pinecone";
 import { NextRequest } from "next/server";
+import { aiServiceEnabled, chatStream } from "@/lib/ai-service";
 
 export const POST = async (req: NextRequest) => {
   // endpoint for asking a question to a pdf file
@@ -39,6 +40,33 @@ export const POST = async (req: NextRequest) => {
     },
   });
 
+  // Agentic RAG service (LangGraph): retrieval, grading, tools, grounding check
+  // and page citations happen there. Conversation memory is kept per file.
+  if (aiServiceEnabled()) {
+    try {
+      const stream = await chatStream({
+        userId,
+        fileId,
+        message,
+        signal: req.signal,
+        onDone: async (answer) => {
+          await db.message.create({
+            data: { text: answer, isUserMessage: false, fileId, userId },
+          });
+        },
+      });
+      return new Response(stream, {
+        headers: { "Content-Type": "text/plain; charset=utf-8" },
+      });
+    } catch (err) {
+      console.error("ai-service chat failed", err);
+      return new Response("The assistant is unavailable. Try again.", {
+        status: 502,
+      });
+    }
+  }
+
+  // Original pipeline (Pinecone + one LLM call), used when AI_SERVICE_URL is unset.
   // 1: vectorize message
   const embeddings = getEmbeddings();
 

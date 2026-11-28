@@ -6,6 +6,7 @@ import {
 } from './trpc'
 import { TRPCError } from '@trpc/server'
 import { db } from '@/db'
+import { aiServiceEnabled, getDocumentStatus } from '@/lib/ai-service'
 import { z } from 'zod'
 import { INFINITE_QUERY_LIMIT } from '@/config/infinite-query'
 import { absoluteUrl } from '@/lib/utils'
@@ -172,6 +173,17 @@ export const appRouter = router({
       })
 
       if (!file) return { status: 'PENDING' as const }
+
+      // With the AI service on, ingestion runs in its worker: sync the status.
+      if (file.uploadStatus === 'PROCESSING' && aiServiceEnabled()) {
+        const status = await getDocumentStatus(ctx.userId, file.id).catch(() => null)
+        const next =
+          status === 'ready' ? 'SUCCESS' : status === 'failed' ? 'FAILED' : null
+        if (next) {
+          await db.file.update({ where: { id: file.id }, data: { uploadStatus: next } })
+          return { status: next }
+        }
+      }
 
       return { status: file.uploadStatus }
     }),
